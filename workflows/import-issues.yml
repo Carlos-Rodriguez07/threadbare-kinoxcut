@@ -1,0 +1,85 @@
+name: Issues Import
+on:
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Instalar dependencias
+        run: pip install requests
+
+      - name: Importar todo desde JSON
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python - << 'EOF'
+          import requests, json, os, time
+
+          token = os.environ["GITHUB_TOKEN"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          headers = {
+              "Authorization": f"token {token}",
+              "Accept": "application/vnd.github.v3+json"
+          }
+
+          # 1. Cargar archivo con UTF-8 para soportar los emojis (1️⃣, 2️⃣, etc)
+          with open("issues.json", "r", encoding="utf-8") as f:
+              issues = json.load(f)
+
+          print(f"Total de issues detectadas en JSON: {len(issues)}")
+
+          # 2. Sincronizar etiquetas primero (colores y nombres)
+          existing_labels_r = requests.get(f"https://api.github.com/repos/{repo}/labels", headers=headers)
+          existing_labels = [l['name'] for l in existing_labels_r.json()] if existing_labels_r.status_code == 200 else []
+
+          for issue in issues:
+              for label_obj in issue.get("labels", []):
+                  if isinstance(label_obj, dict):
+                      name = label_obj.get("name")
+                      if name and name not in existing_labels:
+                          label_data = {
+                              "name": name,
+                              "color": label_obj.get("color"),
+                              "description": label_obj.get("description", "")
+                          }
+                          requests.post(f"https://api.github.com/repos/{repo}/labels", headers=headers, json=label_data)
+                          existing_labels.append(name)
+
+          # 3. Crear las 43 Issues una por una
+          # Invertimos la lista para que la Issue #1 del JSON sea la primera en la lista de GitHub
+          count = 0
+          for issue in reversed(issues):
+              title = issue.get("title")
+              if not title: continue
+
+              body = issue.get("body") or "Sin descripción."
+              label_names = [l.get("name") if isinstance(l, dict) else l for l in issue.get("labels", [])]
+
+              data = {"title": title, "body": body, "labels": label_names}
+
+              r = requests.post(f"https://api.github.com/repos/{repo}/issues", headers=headers, json=data)
+              
+              if r.status_code == 201:
+                  count += 1
+                  print(f"✅ [{count}/43] Creada: {title}")
+              else:
+                  print(f"❌ Error en '{title}': {r.text}")
+              
+              # Pausa necesaria para no ser bloqueado por Spam
+              time.sleep(2) 
+
+          print(f"\n--- Proceso finalizado. Total creadas: {count} ---")
+          EOF

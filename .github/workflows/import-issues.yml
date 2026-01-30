@@ -1,4 +1,4 @@
-name: Issues Import
+name: Import Issues
 on:
   workflow_dispatch:
 
@@ -21,7 +21,7 @@ jobs:
       - name: Instalar dependencias
         run: pip install requests
 
-      - name: Importar todo desde JSON
+      - name: Importar rápido
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -30,56 +30,43 @@ jobs:
 
           token = os.environ["GITHUB_TOKEN"]
           repo = os.environ["GITHUB_REPOSITORY"]
-          headers = {
+          
+          # Usamos Session para reutilizar la conexión TCP
+          session = requests.Session()
+          session.headers.update({
               "Authorization": f"token {token}",
               "Accept": "application/vnd.github.v3+json"
-          }
+          })
 
-          # 1. Cargar archivo con UTF-8 para soportar los emojis (1️⃣, 2️⃣, etc)
           with open("issues.json", "r", encoding="utf-8") as f:
               issues = json.load(f)
 
-          print(f"Total de issues detectadas en JSON: {len(issues)}")
+          # --- PASO 1: Etiquetas de una sola pasada ---
+          print("Sincronizando etiquetas rápidamente...")
+          all_labels = {l.get("name"): l for i in issues for l in i.get("labels", []) if isinstance(l, dict)}
+          for name, data in all_labels.items():
+              session.post(f"https://api.github.com/repos/{repo}/labels", 
+                          json={"name": name, "color": data.get("color"), "description": data.get("description", "")})
 
-          # 2. Sincronizar etiquetas primero (colores y nombres)
-          existing_labels_r = requests.get(f"https://api.github.com/repos/{repo}/labels", headers=headers)
-          existing_labels = [l['name'] for l in existing_labels_r.json()] if existing_labels_r.status_code == 200 else []
-
-          for issue in issues:
-              for label_obj in issue.get("labels", []):
-                  if isinstance(label_obj, dict):
-                      name = label_obj.get("name")
-                      if name and name not in existing_labels:
-                          label_data = {
-                              "name": name,
-                              "color": label_obj.get("color"),
-                              "description": label_obj.get("description", "")
-                          }
-                          requests.post(f"https://api.github.com/repos/{repo}/labels", headers=headers, json=label_data)
-                          existing_labels.append(name)
-
-          # 3. Crear las 43 Issues una por una
-          # Invertimos la lista para que la Issue #1 del JSON sea la primera en la lista de GitHub
-          count = 0
+          # --- PASO 2: Importación de Issues con sleep reducido ---
+          print(f"Disparando {len(issues)} issues...")
           for issue in reversed(issues):
-              title = issue.get("title")
-              if not title: continue
-
-              body = issue.get("body") or "Sin descripción."
-              label_names = [l.get("name") if isinstance(l, dict) else l for l in issue.get("labels", [])]
-
-              data = {"title": title, "body": body, "labels": label_names}
-
-              r = requests.post(f"https://api.github.com/repos/{repo}/issues", headers=headers, json=data)
+              payload = {
+                  "title": issue.get("title"),
+                  "body": issue.get("body") or "",
+                  "labels": [l.get("name") if isinstance(l, dict) else l for l in issue.get("labels", [])]
+              }
+              
+              r = session.post(f"https://api.github.com/repos/{repo}/issues", json=payload)
               
               if r.status_code == 201:
-                  count += 1
-                  print(f"✅ [{count}/43] Creada: {title}")
+                  print(f"✅ {payload['title']}")
+              elif r.status_code == 403: # Si GitHub nos frena
+                  print("⚠️ Rate limit detectado, esperando 10 segundos...")
+                  time.sleep(10)
               else:
-                  print(f"❌ Error en '{title}': {r.text}")
+                  print(f"❌ Error: {r.status_code}")
               
-              # Pausa necesaria para no ser bloqueado por Spam
-              time.sleep(2) 
-
-          print(f"\n--- Proceso finalizado. Total creadas: {count} ---")
+              # Bajamos a 0.8 segundos (Equilibrio perfecto velocidad/seguridad)
+              time.sleep(0.8) 
           EOF
